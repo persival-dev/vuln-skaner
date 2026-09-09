@@ -56,7 +56,7 @@ http://testasp.vulnweb.com
 
 
 Структура проекта
-vuln-sлфтук/
+vuln-skaner/
 ├── scanner_final.py   # Основной скрипт сканера
 ├── requirements.txt   # Зависимости (requests, beautifulsoup4)
 ├── README.md          # Этот файл
