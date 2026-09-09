@@ -35,7 +35,7 @@
 
 ### Клонируй репозиторий
 ```bash
-git clone https://github.com/persival-dev/vulin-skaner.git
+git clone https://github.com/persival-dev/vuln-skaner.git
 cd vuln-skaner
 
 
