@@ -37,7 +37,7 @@
 ```bash
 git clone https://github.com/persival-dev/vuln-skaner.git
 cd vuln-skaner
-
+```
 
 ## Установи зависимости
 pip install -r requirements.txt
